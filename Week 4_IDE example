@@ -1,0 +1,200 @@
+https://mattioli1885journals.com/index.php/actabiomedica/onlinefirst/view/16599
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings("ignore")
+
+# 머신러닝 관련
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, accuracy_score, classification_report
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.callbacks import EarlyStopping
+import os
+
+# 1) 데이터 불러오기: 같은 폴더에 'peach_2nd_ano.csv'가 있어야 합니다.
+#    파일 인코딩 문제가 있을 수 있으므로 utf-8로 먼저 시도하고 실패하면 cp949로 재시도합니다.
+csv_path = "peach_2nd_ano.csv"
+if not os.path.exists(csv_path):
+    raise FileNotFoundError(f"{csv_path} 파일을 찾을 수 없습니다. 스크립트와 동일한 폴더에 CSV를 넣어주세요.")
+
+try:
+    df = pd.read_csv(csv_path, encoding="utf-8")
+except Exception:
+    df = pd.read_csv(csv_path, encoding="cp949", engine="python")
+
+# 2) 기본 확인: 상위 5개, 컬럼 정보, 결측치 개수 확인
+#    - head() : 데이터 구조를 빠르게 파악
+#    - info() : 각 컬럼 타입과 non-null 개수 확인
+#    - isna().sum() : 컬럼별 결측치 개수 확인
+print("===== head(5) =====")
+print(df.head(5))
+print("\n===== info() =====")
+print(df.info())
+print("\n===== 결측치 갯수 (컬럼별) =====")
+print(df.isna().sum())
+
+# 3) 컬럼명 정리(공백/앞뒤 공백 제거)
+df.columns = df.columns.str.strip()
+
+# 4) 숫자형으로 변환 가능한 컬럼은 숫자형으로 변환
+#    - errors='coerce'로 숫자로 변환 불가능한 값은 NaN으로 변환
+numeric_cols = []
+for col in df.columns:
+    # Urine_ID는 아이디로 남겨둡니다.
+    if col == 'Urine_ID':
+        continue
+    # 시도: float 변환 가능한지
+    coerced = pd.to_numeric(df[col], errors='coerce')
+    # 변환 후 숫자가 하나라도 존재하면 숫자형으로 간주
+    if coerced.notna().sum() > 0:
+        df[col] = coerced
+        numeric_cols.append(col)
+    else:
+        # 숫자로 변환 불가하면 그대로 두고 문자형 컬럼으로 남김
+        pass
+
+print("\n===== 숫자형으로 변환된 컬럼 목록 =====")
+print(numeric_cols)
+
+# 5) 허리-엉덩이 비율(waist-hip ratio, whr) 계산
+#    - 원본 컬럼명에 따라 '3_waist', '4_hip'를 사용합니다.
+if '3_waist' not in df.columns or '4_hip' not in df.columns:
+    raise KeyError("CSV에 '3_waist' 또는 '4_hip' 컬럼이 없습니다. 컬럼명이 다른지 확인해주세요.")
+
+# whr 계산 (단위가 동일하다고 가정)
+df['whr'] = df['3_waist'] / df['4_hip']
+
+# 6) 목표변수 생성: whr > 0.875 인 경우를 1, 아니면 0으로 설정
+threshold = 0.875
+df['whr_gt_0875'] = (df['whr'] > threshold).astype(int)
+
+# 7) whr 분포와 임계값에 따른 그룹 수 확인
+print("\n===== whr 요약 통계 =====")
+print(df['whr'].describe())
+print("\n임계값", threshold, "보다 큰 샘플 수:")
+print(df['whr_gt_0875'].value_counts(dropna=False))
+
+# 8) 간단한 시각화: whr 히스토그램 + 임계값 표시
+plt.figure(figsize=(8,4))
+sns.histplot(df['whr'].dropna(), bins=40, kde=True)
+plt.axvline(threshold, color='red', linestyle='--', label=f"threshold={threshold}")
+plt.title("Waist-Hip Ratio (whr) distribution")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# 9) 상관관계 히트맵 (숫자 컬럼만 사용)
+plt.figure(figsize=(12,10))
+corr = df[numeric_cols + ['whr']].corr()
+sns.heatmap(corr, annot=True, fmt=".2f", cmap='coolwarm', vmin=-1, vmax=1)
+plt.title("Numeric features correlation (including whr)")
+plt.show()
+
+# 10) 특징 선택(간단한 베이스라인)
+#     - 여기서는 대표적인 인체계측값과 연관 있을 법한 컬럼들을 사용합니다.
+#     - 최소한 '1_height', '2_weight', '3_waist', '4_hip', '16_age_menarche'가 있다면 사용
+candidate_features = []
+for c in ['1_height','2_weight','3_waist','4_hip','16_age_menarche']:
+    if c in df.columns:
+        candidate_features.append(c)
+
+# 만약 나열된 후보가 너무 적으면, 숫자형 컬럼 중 결측치 비율이 낮은 상위 6개를 사용
+if len(candidate_features) < 3:
+    num_nonnull = df[numeric_cols].notnull().mean().sort_values(ascending=False)
+    good_cols = num_nonnull[num_nonnull > 0.6].index.tolist()  # non-null 비율 > 60%
+    candidate_features = good_cols[:6]  # 상위 6개 선택
+print("\n선택된 특징들(features):", candidate_features)
+
+# 11) 모델을 위해 사용할 데이터프레임 준비
+model_df = df[candidate_features + ['whr_gt_0875', 'whr']].copy()
+
+# 12) 결측치 처리: 간단히 해당 행 제거 (간단한 실습 목적)
+before_len = len(model_df)
+model_df = model_df.dropna(subset=candidate_features + ['whr_gt_0875'])
+after_len = len(model_df)
+print(f"\n결측치 제거 전 샘플 수: {before_len}, 제거 후: {after_len}")
+
+# 13) 특징(X)과 타깃(y) 분리
+X = model_df[candidate_features].values
+y = model_df['whr_gt_0875'].values
+
+# 14) 학습/검증 분할
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# 15) 스케일링: 표준화(평균0, 표준편차1)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# 16) 신경망 모델 정의 (Keras)
+#     - 출력층은 sigmoid로 확률을 반환하도록 함
+model = Sequential([
+    Dense(32, input_dim=X_train_scaled.shape[1], activation='relu', name='Dense_1'),
+    Dense(16, activation='relu', name='Dense_2'),
+    Dense(1, activation='sigmoid', name='Output')
+])
+model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+model.summary()
+
+# 17) 학습: 조기종료(EarlyStopping)를 적용해 과적합 방지
+es = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True, verbose=1)
+history = model.fit(X_train_scaled, y_train, validation_split=0.15, epochs=100, batch_size=8, callbacks=[es], verbose=2)
+
+# 18) 검증: 예측 확률과 클래스, 평가 지표 출력
+y_pred_prob = model.predict(X_test_scaled).ravel()  # 각 샘플이 whr>0.875일 확률
+y_pred = (y_pred_prob >= 0.5).astype(int)
+
+print("\n===== 테스트 셋 평가 =====")
+print("Accuracy:", accuracy_score(y_test, y_pred))
+try:
+    print("ROC AUC:", roc_auc_score(y_test, y_pred_prob))
+except Exception as e:
+    print("ROC AUC 계산 에러:", e)
+print("\nClassification report:\n", classification_report(y_test, y_pred, zero_division=0))
+
+# 19) 예측 결과(확률)를 원본 데이터프레임에 합치기 (테스트 인덱스 보관 필요)
+#     - model_df는 dropna된 서브셋이므로 원래 인덱스를 사용
+test_idx = model_df.index[model_df.index.isin(model_df.index)][len(X_train):len(X_train)+len(X_test)]  # not used; 대신 아래처럼 간단히 만듦
+# 위 방식은 복잡할 수 있으므로 간단히 test 인덱스를 재생성
+_, X_test_idx = train_test_split(model_df.index.values, test_size=0.2, random_state=42, stratify=model_df['whr_gt_0875'])
+# test 인덱스와 예측 확률 길이 일치 확인
+if len(X_test_idx) != len(y_pred_prob):
+    # 위 인덱스 매칭이 맞지 않으면, 그냥 결과를 별도의 CSV로 저장 (인덱스 없이)
+    pred_df = pd.DataFrame({
+        'pred_prob_whr_gt_0875': y_pred_prob,
+        'pred_class_whr_gt_0875': y_pred
+    })
+else:
+    pred_df = pd.DataFrame({'Urine_index': X_test_idx, 'pred_prob_whr_gt_0875': y_pred_prob, 'pred_class_whr_gt_0875': y_pred})
+print("\n테스트 세트 첫 10개 예측 확률 (whr > 0.875일 확률):")
+print(pred_df.head(10))
+
+# 20) 전체 데이터셋에 대해 모델 확률 추정 (결측치가 없는 행만)
+#     - 전체에 적용하려면 결측치 제거된 model_df의 스케일된 특징을 사용
+X_all_scaled = scaler.transform(model_df[candidate_features].values)
+probs_all = model.predict(X_all_scaled).ravel()
+model_df['pred_prob_whr_gt_0875'] = probs_all
+model_df['pred_class_whr_gt_0875'] = (probs_all >= 0.5).astype(int)
+
+# 상위 10개 출력
+print("\n결측치 제거 후 전체(모델용) 샘플 중 상위 10개의 whr, 실제, 예측확률:")
+print(model_df[['whr','whr_gt_0875','pred_prob_whr_gt_0875','pred_class_whr_gt_0875']].head(10))
+
+# 21) 예측 확률 분포 시각화
+plt.figure(figsize=(8,4))
+sns.histplot(model_df['pred_prob_whr_gt_0875'], bins=30, kde=True)
+plt.title("Predicted probability of whr > 0.875")
+plt.xlabel("Predicted probability")
+plt.show()
+
+# 22) 결과 저장 (옵션): 모델용 데이터와 예측 확률을 CSV로 저장
+out_csv = "peach_whr_predictions.csv"
+model_df.to_csv(out_csv, index=False)
+print(f"\n모델용 데이터와 예측 결과를 '{out_csv}'로 저장했습니다.")
+
+# 끝. 필요하면 이 스크립트에서 feature 선택, 전처리, 모델 구조를 조정하여 성능 개선을 시도하세요.
