@@ -1,0 +1,20 @@
+#install.packages("C50")
+library(C50)
+
+UTI <- read.csv("4장/UTI.csv")
+str(UTI)
+
+UTI$Class<-as.factor(UTI$Class)
+
+UTI_train <- UTI[1:100,2:7]
+UTI_test <- UTI[101:120,2:7] 
+
+UTI_train_labels <- UTI[1:100,8]
+UTI_test_labels <- UTI[101:120,8] 
+
+UTI_model <- C5.0(UTI_train, UTI_train_labels)
+UTI_prediction <- predict.C5.0(UTI_model, UTI_test) 
+
+plot(UTI_model) 
+summary(UTI_model)
+CrossTable(UTI_prediction, UTI_test_labels)
