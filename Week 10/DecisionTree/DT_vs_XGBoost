@@ -10,7 +10,7 @@ library(caret)
 library(pROC)
 library(dcurves)
 
-setwd("https://github.com/seungah-lab/Intelligence-powered-epidemiology/raw/refs/heads/main/Week%2010/DecisionTree/u.csv"
+setwd("https://github.com/seungah-lab/Intelligence-powered-epidemiology/raw/refs/heads/main/Week%2010/DecisionTree"
 u<-read.csv("u.csv")
 
 # 문자열을 팩터로 변환 (mice 패키지와 모델링을 위해 필수)
